@@ -7,6 +7,7 @@
   PATCH: No Noclip saat masuk truk + Altitude 5000 + Robust Building Clear
   PATCH: Deskripsi metode dikosongkan (stealth)
   PATCH: Potato Mode & 60 FPS Cap on Auto Start
+  PATCH: Webhook Report — Anonymized & Professional (No Clickable Links)
 ================================================================================
 --]]
 
@@ -824,7 +825,6 @@ task.spawn(function()
             
             if prop then
                 local targetGedung = prop:GetChildren()[1155]
-                -- Pastikan objeknya ada dan belum terhapus
                 if targetGedung and targetGedung.Parent then
                     local nama = targetGedung.Name
                     targetGedung:Destroy()
@@ -834,7 +834,6 @@ task.spawn(function()
         end)
     end
 
-    -- Loop terus berjalan setiap 3 detik untuk mengantisipasi map yang tiba-tiba nge-load (StreamingEnabled)
     while true do
         hapusGedungNyangkut()
         task.wait(3)
@@ -1392,7 +1391,6 @@ local function startFarm()
     if autoFarmRunning then return end
     autoFarmRunning = true
     
-    -- Memicu Pengunci 60 FPS & Grafik Rata Kiri
     EnableOptimizationAndPotato()
     
     notify("King Akbar", "🚛 Auto Delivery STARTED")
@@ -1508,6 +1506,25 @@ local WebhookURL             = ""
 local WebhookIntervalMinutes = 5
 local webhookLoop            = nil
 
+-- ============================================================================
+-- // 9.5 NAME MASKER (ANONYMIZED)
+-- ============================================================================
+local function maskName(name)
+    if not name or name == "" then return "Anonymous" end
+    local len = #name
+    if len == 1 then return "●" end
+    if len == 2 then return name:sub(1,1) .. "●" end
+    if len <= 4 then
+        return name:sub(1,1) .. string.rep("●", len - 2) .. name:sub(len, len)
+    end
+    -- 5+ karakter: K●●●●a (first + dots + last)
+    local dots = math.min(len - 2, 5)
+    return name:sub(1,1) .. string.rep("●", dots) .. name:sub(len, len)
+end
+
+-- ============================================================================
+-- // 9.6 EMBED BUILDER (PROFESSIONAL — NO CLICKABLE LINKS)
+-- ============================================================================
 local function buildReportEmbed()
     local profit     = Stats.moneyNow - Stats.moneyBefore
     local sessionSec = math.max(Stats.farmTime, 1)
@@ -1516,44 +1533,58 @@ local function buildReportEmbed()
     local perDeliv   = Stats.deliveries > 0 and math.floor(profit / Stats.deliveries) or 0
     local delPerHour = math.floor((Stats.deliveries / sessionSec) * 3600)
 
-    local statusIcon = profit > 0 and "🟢" or (profit < 0 and "🔴" or "🟡")
+    -- Dynamic status color
+    local statusIcon, statusText, embedColor
+    if profit > 0 then
+        statusIcon, statusText, embedColor = "🟢", "PROFITABLE", 0x10B981
+    elseif profit < 0 then
+        statusIcon, statusText, embedColor = "🔴", "LOSS",       0xEF4444
+    else
+        statusIcon, statusText, embedColor = "🟡", "IDLE",       0xF59E0B
+    end
+
     local profitSign = profit >= 0 and "+" or "-"
+    local maskedName = maskName(LocalPlayer.Name)
+    local serverId   = game.JobId ~= "" and (game.JobId:sub(1, 12) .. "...") or "Private Server"
+    local placeholder = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     return {
+        -- author tanpa URL → tidak clickable di Discord
         author = {
-            name     = "King Akbar Hub",
+            name     = "👑  KING AKBAR HUB  •  DELIVERY SYSTEM",
             icon_url = "https://cdn-icons-png.flaticon.com/512/1077/1077012.png",
         },
-        title       = "Delivery Session Report",
+
+        title       = "📦   DELIVERY SESSION REPORT",
         description = string.format(
-            "%s **Session Status:** %s\n"
-            .. "**Account:** `%s`\n"
-            .. "**Server:** `%s`",
+            "**Status :**  %s  `%s`\n**Date   :**  `%s`",
             statusIcon,
-            profit > 0 and "Profitable" or (profit < 0 and "Loss" or "Idle"),
-            LocalPlayer.Name,
-            game.JobId ~= "" and game.JobId:sub(1, 12).."..." or "Private"
+            statusText,
+            os.date("%d %b %Y  •  %H:%M:%S")
         ),
-        color = profit > 0 and 0x10B981
-             or (profit < 0 and 0xEF4444 or 0xF59E0B),
+        color = embedColor,
+
         fields = {
+            -- ─── WALLET BLOCK ───
             {
-                name   = "💰  Wallet",
+                name   = placeholder .. "  💰  WALLET  " .. placeholder,
                 value  = string.format(
-                    "```yaml\nStarting : %s\nCurrent  : %s\n```",
+                    "```yaml\n"
+                    .. "Starting Balance : %s\n"
+                    .. "Current Balance  : %s\n"
+                    .. "Session Profit   : %s%s\n"
+                    .. "```",
                     formatMoney(Stats.moneyBefore),
-                    formatMoney(Stats.moneyNow)
+                    formatMoney(Stats.moneyNow),
+                    profitSign, formatMoney(profit)
                 ),
                 inline = false,
             },
+
+            -- ─── PERFORMANCE ROW ───
             {
-                name   = "📈  Profit",
-                value  = string.format("```diff\n%s%s\n```", profitSign, formatMoney(profit)),
-                inline = true,
-            },
-            {
-                name   = "⏱️  Session",
-                value  = string.format("```yaml\n%s\n```", formatTime(sessionSec)),
+                name   = "⚡  Income / Hour",
+                value  = string.format("```yaml\n%s\n```", formatMoney(perHour)),
                 inline = true,
             },
             {
@@ -1562,29 +1593,52 @@ local function buildReportEmbed()
                 inline = true,
             },
             {
-                name   = "⚡  Performance",
-                value  = string.format(
-                    "```yaml\nIncome/hr : %s\nDeliver/hr: %d\n```",
-                    formatMoney(perHour),
-                    delPerHour
-                ),
+                name   = "⏱️  Session Time",
+                value  = string.format("```yaml\n%s\n```", formatTime(sessionSec)),
                 inline = true,
             },
             {
-                name   = "📦  Average",
+                name   = "💵  Per Delivery",
+                value  = string.format("```yaml\n%s\n```",
+                    Stats.deliveries > 0 and formatMoney(perDeliv) or "—"),
+                inline = true,
+            },
+            {
+                name   = "📊  Delivery / Hour",
+                value  = string.format("```yaml\n%d / hour\n```", delPerHour),
+                inline = true,
+            },
+            {
+                name   = "🎯  System Status",
+                value  = string.format("```yaml\n%s\n```",
+                    autoFarmRunning and "ACTIVE" or "STANDBY"),
+                inline = true,
+            },
+
+            -- ─── ACCOUNT BLOCK (ANONYMIZED) ───
+            {
+                name   = placeholder .. "  👤  ACCOUNT  " .. placeholder,
                 value  = string.format(
-                    "```yaml\nPer delivery: %s\n```",
-                    Stats.deliveries > 0 and formatMoney(perDeliv) or "—"
+                    "```yaml\n"
+                    .. "Name   : %s\n"
+                    .. "Server : %s\n"
+                    .. "```",
+                    maskedName,
+                    serverId
                 ),
                 inline = false,
             },
         },
+
         thumbnail = {
             url = "https://cdn-icons-png.flaticon.com/512/9337/9337597.png",
         },
+
+        -- footer tanpa URL → tidak clickable
         footer = {
-            text = "King Akbar Hub  •  Delivery System  •  " .. os.date("%d %b %Y  •  %H:%M:%S"),
+            text = "🔒  Confidential Report  •  King Akbar Hub  •  Automated Delivery System",
         },
+
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     }
 end
@@ -1652,7 +1706,7 @@ WebhookTab:Paragraph({
     Title = "Discord Integration",
     Desc  = "Automatically send delivery session reports to your Discord "
          .. "channel. Reports include wallet balance, profit, session time, "
-         .. "and performance metrics.",
+         .. "and performance metrics. Account name is masked for privacy.",
     Image = "rbxassetid://107726435417936",
 })
 
