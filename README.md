@@ -1,1 +1,0 @@
-# Kamu-siapa-siapa-aku
