@@ -847,8 +847,8 @@ local farmConfig = {
     TRUCK_SEAT_POSITION  = Vector3.new(35173.47, 134.51, -54683.63),
     STARTER_DISTANCE     = 20,
     MALANG_POLL_INTERVAL = 0.02,
-    highAltitude         = 6000,
-    descendTime          = 45,
+    highAltitude         = 3000,
+    descendTime          = 50,
 }
 
 -- ===== STATE =====
