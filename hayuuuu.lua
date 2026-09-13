@@ -8,6 +8,8 @@
   PATCH: Deskripsi metode dikosongkan (stealth)
   PATCH: Potato Mode & 60 FPS Cap on Auto Start
   PATCH: Webhook Report — Anonymized & Professional (No Clickable Links)
+  PATCH: kingAkbarDrop — Tween 50s TETAP + Physics & Movement Sanity
+  PATCH: Presisi Landing — Target Destination["4"].Image + Raycast Y-Sync
 ================================================================================
 --]]
 
@@ -822,7 +824,6 @@ task.spawn(function()
         pcall(function()
             local map = Services.Workspace:FindFirstChild("Map")
             local prop = map and map:FindFirstChild("Prop")
-            
             if prop then
                 local targetGedung = prop:GetChildren()[1155]
                 if targetGedung and targetGedung.Parent then
@@ -833,7 +834,6 @@ task.spawn(function()
             end
         end)
     end
-
     while true do
         hapusGedungNyangkut()
         task.wait(3)
@@ -848,7 +848,7 @@ local farmConfig = {
     STARTER_DISTANCE     = 20,
     MALANG_POLL_INTERVAL = 0.02,
     highAltitude         = 3000,
-    descendTime          = 50,
+    descendTime          = 45,
 }
 
 -- ===== STATE =====
@@ -1110,69 +1110,224 @@ local function TriggerSpawnerSmart()
     return false
 end
 
--- ===== KING AKBAR DROP (Instant Arrival) =====
-local function kingAkbarDrop(vehicle, target)
-    if not vehicle then return end
-    local main = vehicle.PrimaryPart
-    if not main then return end
+-- ============================================================================
+-- // DESTINATION RESOLVER — Presisi ke Destination["4"].Image
+-- ============================================================================
+local function GetPreciseDestination()
+    -- Prioritas 1: Destination["4"].Image (titik presisi job truck)
+    local ok1, img = pcall(function()
+        return Services.Workspace
+            :WaitForChild("Etc", 5)
+            :WaitForChild("Job", 5)
+            :WaitForChild("Truck", 5)
+            :WaitForChild("Destination", 5)
+            :WaitForChild("4", 5)
+            :WaitForChild("Image", 5)
+    end)
+    if ok1 and img and img:IsA("BasePart") then
+        print("✅ [Destination] Resolved via Destination[4].Image → " .. tostring(img.Position))
+        return img.Position, img
+    end
 
-    local parts, anchored = {}, {}
+    -- Prioritas 2: Destination["4"] pivot (kalau Image bukan BasePart)
+    local ok2, dest4 = pcall(function()
+        return Services.Workspace
+            :WaitForChild("Etc", 5)
+            :WaitForChild("Job", 5)
+            :WaitForChild("Truck", 5)
+            :WaitForChild("Destination", 5)
+            :WaitForChild("4", 5)
+    end)
+    if ok2 and dest4 then
+        local pos = dest4:GetPivot().Position
+        print("⚠️ [Destination] Fallback ke Destination[4] pivot → " .. tostring(pos))
+        return pos, dest4
+    end
+
+    -- Prioritas 3: Waypoint lama (fallback terakhir)
+    local ok3, wp = pcall(function()
+        return Services.Workspace
+            :WaitForChild("Etc", 5)
+            :WaitForChild("Waypoint", 5)
+            :WaitForChild("Waypoint", 5)
+    end)
+    if ok3 and wp then
+        print("⚠️ [Destination] Fallback ke Waypoint → " .. tostring(wp.Position))
+        return wp.Position, wp
+    end
+
+    warn("❌ [Destination] Semua resolver gagal!")
+    return nil, nil
+end
+
+-- ============================================================================
+-- // KING AKBAR DROP — Tween 50s TETAP + Physics & Movement Sanity (PATCHED)
+-- ============================================================================
+local function kingAkbarDrop(vehicle, target)
+    -- ── Guard awal ──
+    if not vehicle or not vehicle.Parent then return end
+    local main = vehicle.PrimaryPart
+    if not main or not main.Parent then return end
+
+    -- ── 1. Kumpulkan parts & simpan state ──
+    local parts       = {}
+    local wasAnchored = {}
+    local seatRefs    = {}
+
     for _, p in ipairs(vehicle:GetDescendants()) do
-        if p:IsA("BasePart") then
+        if p:IsA("BasePart") and p.Parent then
             parts[#parts + 1] = p
-            anchored[p] = p.Anchored
-            p.Anchored = true
-        end
-        if p:IsA("VehicleSeat") then
-            pcall(function()
-                p.ThrottleFloat = 0
-                p.SteerFloat    = 0
-            end)
+            wasAnchored[p]    = p.Anchored
+            p.Anchored        = true
+            if p:IsA("VehicleSeat") then
+                table.insert(seatRefs, p)
+            end
         end
     end
 
-    local _, yRot = main.CFrame:ToEulerAnglesYXZ()
+    -- netralkan throttle supaya tidak melonjak setelah unfreeze
+    for _, seat in ipairs(seatRefs) do
+        pcall(function()
+            seat.ThrottleFloat = 0
+            seat.SteerFloat    = 0
+        end)
+    end
+
+    -- ── 2. Hitung offset tiap part relatif ke main ──
     local mainCF  = main.CFrame
+    local _, yRot = mainCF:ToEulerAnglesYXZ()
     local offsets = {}
     for _, p in ipairs(parts) do
-        if p ~= main then offsets[p] = mainCF:ToObjectSpace(p.CFrame) end
-    end
-
-    local highPos = target + Vector3.new(0, farmConfig.highAltitude, 0)
-    main.CFrame = CFrame.new(highPos) * CFrame.fromEulerAnglesYXZ(0, yRot, 0)
-    for _, p in ipairs(parts) do
-        if p ~= main and offsets[p] then
-            p.CFrame = main.CFrame:ToWorldSpace(offsets[p])
+        if p ~= main and p.Parent then
+            offsets[p] = mainCF:ToObjectSpace(p.CFrame)
         end
     end
+
+    -- ── 3. Presisi Y — Raycast dari XZ Destination ke bawah ──
+    --    Destination["4"].Image sudah di permukaan tanah, jadi kita raycast
+    --    dari atas XZ-nya untuk dapat Y tanah yang akurat, lalu ambil
+    --    Y tertinggi antara raycast dan Y part itu sendiri.
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = { vehicle, LocalPlayer.Character }
+
+    local rayResult = Services.Workspace:Raycast(
+        Vector3.new(target.X, target.Y + 500, target.Z),
+        Vector3.new(0, -600, 0),
+        rayParams
+    )
+
+    -- Ambil Y dari raycast; kalau gagal pakai Y part langsung
+    local groundY = rayResult and rayResult.Position.Y or target.Y
+
+    -- Pastikan tidak kurang dari Y part (Destination sudah di ground)
+    groundY = math.max(groundY, target.Y)
+
+    -- Offset +1.5 — cukup untuk ban menyentuh tanah tanpa amblas
+    local safeTarget = Vector3.new(target.X, groundY + 1.5, target.Z)
+
+    -- ── 4. Angkat ke altitude tinggi ──
+    local highPos  = safeTarget + Vector3.new(0, farmConfig.highAltitude, 0)
+    local startCF  = CFrame.new(highPos) * CFrame.fromEulerAnglesYXZ(0, yRot, 0)
+    main.CFrame    = startCF
+
+    -- sinkron semua part ke posisi tinggi
+    for _, p in ipairs(parts) do
+        if p ~= main and p.Parent and offsets[p] then
+            p.CFrame = startCF:ToWorldSpace(offsets[p])
+        end
+    end
+
+    -- tunggu satu frame supaya engine acknowledge posisi awal
+    Services.RunService.Heartbeat:Wait()
+
+    -- ── 5. Tween 50 detik turun ke target (TETAP — anti-detect) ──
+    local targetCF = CFrame.new(safeTarget) * CFrame.fromEulerAnglesYXZ(0, yRot, 0)
 
     local tween = Services.TweenSvc:Create(
         main,
-        TweenInfo.new(farmConfig.descendTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        { CFrame = CFrame.new(target) * CFrame.fromEulerAnglesYXZ(0, yRot, 0) }
+        TweenInfo.new(
+            farmConfig.descendTime,        -- 50 detik
+            Enum.EasingStyle.Quad,
+            Enum.EasingDirection.Out
+        ),
+        { CFrame = targetCF }
     )
 
+    -- ── 6. Heartbeat sync selama tween — guard + velocity wipe per-frame ──
+    local tweenDone = false
     local conn = Services.RunService.Heartbeat:Connect(function()
+        if tweenDone then return end
+
+        -- guard: pastikan vehicle & main masih valid
+        if not vehicle.Parent or not main.Parent then
+            tweenDone = true
+            return
+        end
+
+        local curMainCF = main.CFrame
+
+        -- sinkron semua part lain ke posisi main
         for _, p in ipairs(parts) do
-            if p ~= main and offsets[p] and p.Parent then
-                p.CFrame = main.CFrame:ToWorldSpace(offsets[p])
+            if p ~= main and p.Parent and offsets[p] then
+                p.CFrame = curMainCF:ToWorldSpace(offsets[p])
+            end
+        end
+
+        -- zero velocity tiap frame selama turun (anti-physics drift)
+        for _, p in ipairs(parts) do
+            if p.Parent and p.Anchored then
+                pcall(function()
+                    p.AssemblyLinearVelocity  = Vector3.zero
+                    p.AssemblyAngularVelocity = Vector3.zero
+                end)
             end
         end
     end)
 
     tween:Play()
     tween.Completed:Wait()
+
+    -- ── 7. Tandai tween selesai & putus koneksi ──
+    tweenDone = true
     conn:Disconnect()
 
+    -- ── 8. Snap final — paksa posisi tepat di ground ──
+    if main.Parent then
+        main.CFrame = targetCF
+        for _, p in ipairs(parts) do
+            if p ~= main and p.Parent and offsets[p] then
+                p.CFrame = targetCF:ToWorldSpace(offsets[p])
+            end
+        end
+    end
+
+    -- satu frame tunggu setelah snap
+    Services.RunService.Heartbeat:Wait()
+
+    -- ── 9. Unfreeze physics + velocity wipe pass 1 ──
     for _, p in ipairs(parts) do
-        if p.Parent then
-            p.Anchored = anchored[p]
+        if p and p.Parent then
+            p.Anchored = wasAnchored[p]
             pcall(function()
                 p.AssemblyLinearVelocity  = Vector3.zero
                 p.AssemblyAngularVelocity = Vector3.zero
             end)
         end
     end
+
+    -- ── 10. Velocity wipe pass 2 — satu frame setelah unfreeze ──
+    Services.RunService.Heartbeat:Wait()
+    for _, p in ipairs(parts) do
+        if p and p.Parent and not p.Anchored then
+            pcall(function()
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+
+    print("✅ [King Akbar] Truck landed safely at Y=" .. string.format("%.1f", safeTarget.Y))
 end
 
 -- ===== ENSURE SEATED =====
@@ -1279,11 +1434,21 @@ local function FarmLoop()
                 return
             end
 
-            -- 4. Instant Arrival
-            print("🚀 Instant arrival (altitude " .. farmConfig.highAltitude .. ")...")
-            local destPart = Services.Workspace
-                :WaitForChild("Etc", 5):WaitForChild("Waypoint", 5):WaitForChild("Waypoint", 5)
-            local destPos  = destPart.Position
+            -- 4. Instant Arrival (tween 50s anti-detect)
+            print("🚀 Resolving precise destination...")
+            local destPos, destRef = GetPreciseDestination()
+
+            if not destPos then
+                warn("❌ [FarmLoop] Destination tidak ditemukan, skip cycle.")
+                TurnOnCollisionIfNeeded()
+                DisableCameraFollowLock()
+                task.wait(2)
+                continue
+            end
+
+            print("🚀 Descending → " .. tostring(destPos)
+                .. " | alt=" .. farmConfig.highAltitude
+                .. " | dur=" .. farmConfig.descendTime .. "s")
 
             kingAkbarDrop(truck, destPos)
 
@@ -1313,15 +1478,11 @@ local function FarmLoop()
                     return
                 end
                 task.wait(1)
-                local ok, newDest = pcall(function()
-                    return Services.Workspace
-                        :WaitForChild("Etc", 5):WaitForChild("Waypoint", 5):WaitForChild("Waypoint", 5)
-                end)
-                if ok and newDest then
-                    if (newDest.Position - lastDestPos).Magnitude > 5 then
-                        print("✅ Destination changed! Reward received.")
-                        break
-                    end
+                -- Cek perubahan via Destination["4"].Image terlebih dahulu
+                local newPos, _ = GetPreciseDestination()
+                if newPos and (newPos - lastDestPos).Magnitude > 5 then
+                    print("✅ Destination changed! Reward received.")
+                    break
                 end
             end
 
@@ -1339,7 +1500,7 @@ local potatoModeApplied = false
 local function EnableOptimizationAndPotato()
     if potatoModeApplied then return end
     potatoModeApplied = true
-    
+
     -- 1. Apply FPS Cap (60 FPS)
     pcall(function()
         if setfpscap then
@@ -1347,38 +1508,39 @@ local function EnableOptimizationAndPotato()
             print("🚀 [King Akbar] FPS Capped to 60.")
         end
     end)
-    
+
     -- 2. Apply Potato Mode
     pcall(function()
         local Lighting = game:GetService("Lighting")
-        local Terrain = workspace:FindFirstChildOfClass("Terrain")
+        local Terrain  = Services.Workspace:FindFirstChildOfClass("Terrain")
 
-        Lighting.GlobalShadows = false
-        Lighting.FogEnd = 9e9
-        Lighting.ShadowSoftness = 0
-        Lighting.EnvironmentDiffuseScale = 0
-        Lighting.EnvironmentSpecularScale = 0
-        Lighting.Brightness = 1
-        
+        Lighting.GlobalShadows             = false
+        Lighting.FogEnd                    = 9e9
+        Lighting.ShadowSoftness            = 0
+        Lighting.EnvironmentDiffuseScale   = 0
+        Lighting.EnvironmentSpecularScale  = 0
+        Lighting.Brightness                = 1
+
         for _, v in ipairs(Lighting:GetDescendants()) do
-            if v:IsA("PostEffect") or v:IsA("BlurEffect") or v:IsA("BloomEffect") or v:IsA("ColorCorrectionEffect") or v:IsA("SunRaysEffect") or v:IsA("DepthOfFieldEffect") then
+            if v:IsA("PostEffect") or v:IsA("BlurEffect") or v:IsA("BloomEffect")
+            or v:IsA("ColorCorrectionEffect") or v:IsA("SunRaysEffect") or v:IsA("DepthOfFieldEffect") then
                 v.Enabled = false
             end
         end
 
         if Terrain then
-            Terrain.WaterWaveSize = 0
-            Terrain.WaterWaveSpeed = 0
-            Terrain.WaterReflectance = 0
-            Terrain.WaterTransparency = 0
-            Terrain.Decoration = false
+            Terrain.WaterWaveSize      = 0
+            Terrain.WaterWaveSpeed     = 0
+            Terrain.WaterReflectance   = 0
+            Terrain.WaterTransparency  = 0
+            Terrain.Decoration         = false
         end
 
-        for _, v in ipairs(workspace:GetDescendants()) do
+        for _, v in ipairs(Services.Workspace:GetDescendants()) do
             if v:IsA("BasePart") then
-                v.Material = Enum.Material.SmoothPlastic
+                v.Material    = Enum.Material.SmoothPlastic
                 v.Reflectance = 0
-                v.CastShadow = false
+                v.CastShadow  = false
             elseif v:IsA("Decal") or v:IsA("Texture") then
                 v.Transparency = 1
             end
@@ -1390,9 +1552,9 @@ end
 local function startFarm()
     if autoFarmRunning then return end
     autoFarmRunning = true
-    
+
     EnableOptimizationAndPotato()
-    
+
     notify("King Akbar", "🚛 Auto Delivery STARTED")
     task.spawn(function()
         while autoFarmRunning do
@@ -1470,7 +1632,6 @@ end)
 
 local AutoFarmSection = FarmTab:Section({ Title = "Delivery System" })
 
--- ✅ Desc dikosongkan (stealth)
 local FarmToggle = AutoFarmSection:Toggle({
     Title    = "Auto Delivery",
     Desc     = "",
@@ -1517,7 +1678,6 @@ local function maskName(name)
     if len <= 4 then
         return name:sub(1,1) .. string.rep("●", len - 2) .. name:sub(len, len)
     end
-    -- 5+ karakter: K●●●●a (first + dots + last)
     local dots = math.min(len - 2, 5)
     return name:sub(1,1) .. string.rep("●", dots) .. name:sub(len, len)
 end
@@ -1533,7 +1693,6 @@ local function buildReportEmbed()
     local perDeliv   = Stats.deliveries > 0 and math.floor(profit / Stats.deliveries) or 0
     local delPerHour = math.floor((Stats.deliveries / sessionSec) * 3600)
 
-    -- Dynamic status color
     local statusIcon, statusText, embedColor
     if profit > 0 then
         statusIcon, statusText, embedColor = "🟢", "PROFITABLE", 0x10B981
@@ -1543,18 +1702,16 @@ local function buildReportEmbed()
         statusIcon, statusText, embedColor = "🟡", "IDLE",       0xF59E0B
     end
 
-    local profitSign = profit >= 0 and "+" or "-"
-    local maskedName = maskName(LocalPlayer.Name)
-    local serverId   = game.JobId ~= "" and (game.JobId:sub(1, 12) .. "...") or "Private Server"
+    local profitSign  = profit >= 0 and "+" or "-"
+    local maskedName  = maskName(LocalPlayer.Name)
+    local serverId    = game.JobId ~= "" and (game.JobId:sub(1, 12) .. "...") or "Private Server"
     local placeholder = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     return {
-        -- author tanpa URL → tidak clickable di Discord
         author = {
             name     = "👑  KING AKBAR HUB  •  DELIVERY SYSTEM",
             icon_url = "https://cdn-icons-png.flaticon.com/512/1077/1077012.png",
         },
-
         title       = "📦   DELIVERY SESSION REPORT",
         description = string.format(
             "**Status :**  %s  `%s`\n**Date   :**  `%s`",
@@ -1563,9 +1720,7 @@ local function buildReportEmbed()
             os.date("%d %b %Y  •  %H:%M:%S")
         ),
         color = embedColor,
-
         fields = {
-            -- ─── WALLET BLOCK ───
             {
                 name   = placeholder .. "  💰  WALLET  " .. placeholder,
                 value  = string.format(
@@ -1580,8 +1735,6 @@ local function buildReportEmbed()
                 ),
                 inline = false,
             },
-
-            -- ─── PERFORMANCE ROW ───
             {
                 name   = "⚡  Income / Hour",
                 value  = string.format("```yaml\n%s\n```", formatMoney(perHour)),
@@ -1614,8 +1767,6 @@ local function buildReportEmbed()
                     autoFarmRunning and "ACTIVE" or "STANDBY"),
                 inline = true,
             },
-
-            -- ─── ACCOUNT BLOCK (ANONYMIZED) ───
             {
                 name   = placeholder .. "  👤  ACCOUNT  " .. placeholder,
                 value  = string.format(
@@ -1629,16 +1780,12 @@ local function buildReportEmbed()
                 inline = false,
             },
         },
-
         thumbnail = {
             url = "https://cdn-icons-png.flaticon.com/512/9337/9337597.png",
         },
-
-        -- footer tanpa URL → tidak clickable
         footer = {
             text = "🔒  Confidential Report  •  King Akbar Hub  •  Automated Delivery System",
         },
-
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     }
 end
